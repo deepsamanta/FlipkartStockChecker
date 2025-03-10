@@ -9,7 +9,6 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
-// Setup the routes
 const setup = async () => {
   await registerRoutes(app);
   
@@ -29,36 +28,36 @@ let appPromise = setup();
 // Export the handler function for Vercel
 export default async function handler(req: any, res: any) {
   const app = await appPromise;
-  return new Promise((resolve, reject) => {
+  return new Promise<void>((resolve, reject) => {
     // Create a mock response to capture Express's response
     const mockRes = {
       ...res,
-      end: function(chunk) {
+      end: function(chunk?: string | Buffer) {
         res.end(chunk);
-        resolve(undefined);
+        resolve();
         return this;
       },
-      sendFile: function(path) {
+      sendFile: function(filePath: string) {
         // Read the file and send it
         const fs = require('fs');
         try {
-          const content = fs.readFileSync(path, 'utf8');
+          const content = fs.readFileSync(filePath, 'utf8');
           res.setHeader('Content-Type', 'text/html');
           res.end(content);
-          resolve(undefined);
+          resolve();
         } catch (err) {
           res.statusCode = 404;
           res.end('File not found');
-          resolve(undefined);
+          resolve();
         }
         return this;
       }
     };
     
     // Forward the request to the Express app
-    app(req, mockRes, (e) => {
+    app(req, mockRes, (e: any) => {
       if (e) reject(e);
-      resolve(undefined);
+      resolve();
     });
   });
 }
