@@ -1,0 +1,462 @@
+// server/index.ts
+import express2 from "express";
+
+// server/routes.ts
+import { createServer } from "http";
+
+// server/storage.ts
+var MemStorage = class {
+  cache;
+  CACHE_TTL = 1e3 * 60 * 15;
+  // 15 minutes
+  constructor() {
+    this.cache = /* @__PURE__ */ new Map();
+  }
+  async getCachedResults(productUrl) {
+    const cached = this.cache.get(productUrl);
+    if (!cached) return null;
+    if (Date.now() - cached.timestamp > this.CACHE_TTL) {
+      this.cache.delete(productUrl);
+      return null;
+    }
+    return cached.results;
+  }
+  async saveResults(productUrl, results) {
+    this.cache.set(productUrl, {
+      results,
+      timestamp: Date.now()
+    });
+  }
+};
+var storage = new MemStorage();
+
+// server/scraper.ts
+import axios from "axios";
+import * as cheerio from "cheerio";
+var USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
+async function fetchWithRetry(url, options, retries = 3) {
+  try {
+    return await axios(url, options);
+  } catch (error) {
+    if (retries > 0) {
+      console.log(`Retrying request (${4 - retries}/3)...`);
+      await new Promise((resolve) => setTimeout(resolve, 2e3));
+      return fetchWithRetry(url, options, retries - 1);
+    }
+    throw error;
+  }
+}
+async function checkAvailability(productUrl, pincode) {
+  try {
+    console.log(`Checking availability for pincode ${pincode}`);
+    const response = await fetchWithRetry(productUrl, {
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cookie": `pincode=${pincode}`,
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Upgrade-Insecure-Requests": "1"
+      },
+      timeout: 3e4,
+      // 30 seconds timeout
+      maxRedirects: 5
+    });
+    const $ = cheerio.load(response.data);
+    const htmlContent = $("body").html() || "";
+    console.log(`HTML content length: ${htmlContent.length}`);
+    const outOfStock = $("._16FRp0").length > 0;
+    if (outOfStock) {
+      console.log("Product is out of stock");
+      return false;
+    }
+    let foundDeliveryText = false;
+    $("*").each((_, element) => {
+      const text2 = $(element).text().trim().toLowerCase();
+      if (text2.includes("delivery by")) {
+        console.log("Found delivery text:", text2);
+        foundDeliveryText = true;
+        return false;
+      }
+    });
+    if (!foundDeliveryText) {
+      console.log("No delivery text found for pincode", pincode);
+      console.log("Sample HTML:", htmlContent.substring(0, 2e3));
+    }
+    return foundDeliveryText;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      console.error(`Error checking availability for pincode ${pincode}:`, {
+        status: error.response?.status,
+        message: error.message,
+        url: error.config?.url,
+        data: error.response?.data
+      });
+    } else {
+      console.error(`Error checking availability for pincode ${pincode}:`, error);
+    }
+    throw error;
+  }
+}
+function validateFlipkartUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname.includes("flipkart.com") && (url.includes("/p/") || url.includes("/itm/"));
+  } catch {
+    return false;
+  }
+}
+
+// shared/schema.ts
+import { pgTable, text, serial, timestamp, integer } from "drizzle-orm/pg-core";
+import { createInsertSchema } from "drizzle-zod";
+import { z } from "zod";
+var productChecks = pgTable("product_checks", {
+  id: serial("id").primaryKey(),
+  productUrl: text("product_url").notNull(),
+  pincode: text("pincode").notNull(),
+  isAvailable: integer("is_available").notNull(),
+  checkedAt: timestamp("checked_at").defaultNow().notNull()
+});
+var urlSchema = z.object({
+  url: z.string().url().refine((url) => url.includes("flipkart.com"), {
+    message: "Must be a valid Flipkart product URL"
+  })
+});
+var pincodeSchema = z.object({
+  pincode: z.string().length(6).regex(/^\d+$/, "Must contain only numbers")
+});
+var insertProductCheckSchema = createInsertSchema(productChecks);
+
+// server/routes.ts
+import rateLimit from "express-rate-limit";
+
+// client/src/lib/pincodes.ts
+var majorPincodes = [
+  // North India
+  { pincode: "110001", city: "New Delhi", state: "Delhi" },
+  { pincode: "110020", city: "South Delhi", state: "Delhi" },
+  { pincode: "201301", city: "Noida", state: "Uttar Pradesh" },
+  { pincode: "226001", city: "Lucknow", state: "Uttar Pradesh" },
+  { pincode: "208001", city: "Kanpur", state: "Uttar Pradesh" },
+  { pincode: "221001", city: "Varanasi", state: "Uttar Pradesh" },
+  { pincode: "250001", city: "Meerut", state: "Uttar Pradesh" },
+  { pincode: "243001", city: "Bareilly", state: "Uttar Pradesh" },
+  { pincode: "302001", city: "Jaipur", state: "Rajasthan" },
+  { pincode: "342001", city: "Jodhpur", state: "Rajasthan" },
+  { pincode: "313001", city: "Udaipur", state: "Rajasthan" },
+  { pincode: "334001", city: "Bikaner", state: "Rajasthan" },
+  { pincode: "305001", city: "Ajmer", state: "Rajasthan" },
+  { pincode: "160001", city: "Chandigarh", state: "Chandigarh" },
+  { pincode: "180001", city: "Jammu", state: "Jammu and Kashmir" },
+  { pincode: "190001", city: "Srinagar", state: "Jammu and Kashmir" },
+  { pincode: "173212", city: "Shimla", state: "Himachal Pradesh" },
+  { pincode: "176001", city: "Kullu", state: "Himachal Pradesh" },
+  { pincode: "175131", city: "Manali", state: "Himachal Pradesh" },
+  { pincode: "248001", city: "Dehradun", state: "Uttarakhand" },
+  { pincode: "263001", city: "Nainital", state: "Uttarakhand" },
+  { pincode: "244001", city: "Haridwar", state: "Uttarakhand" },
+  { pincode: "144001", city: "Jalandhar", state: "Punjab" },
+  { pincode: "143001", city: "Amritsar", state: "Punjab" },
+  { pincode: "141001", city: "Ludhiana", state: "Punjab" },
+  { pincode: "147001", city: "Patiala", state: "Punjab" },
+  // South India
+  { pincode: "560001", city: "Bangalore", state: "Karnataka" },
+  { pincode: "560037", city: "Electronic City", state: "Karnataka" },
+  { pincode: "575001", city: "Mangalore", state: "Karnataka" },
+  { pincode: "580001", city: "Hubli", state: "Karnataka" },
+  { pincode: "590001", city: "Belgaum", state: "Karnataka" },
+  { pincode: "583101", city: "Hampi", state: "Karnataka" },
+  { pincode: "600001", city: "Chennai", state: "Tamil Nadu" },
+  { pincode: "625001", city: "Madurai", state: "Tamil Nadu" },
+  { pincode: "641001", city: "Coimbatore", state: "Tamil Nadu" },
+  { pincode: "620001", city: "Trichy", state: "Tamil Nadu" },
+  { pincode: "635001", city: "Hosur", state: "Tamil Nadu" },
+  { pincode: "500001", city: "Hyderabad", state: "Telangana" },
+  { pincode: "500032", city: "Hi-Tech City", state: "Telangana" },
+  { pincode: "506001", city: "Warangal", state: "Telangana" },
+  { pincode: "695001", city: "Thiruvananthapuram", state: "Kerala" },
+  { pincode: "682001", city: "Kochi", state: "Kerala" },
+  { pincode: "673001", city: "Kozhikode", state: "Kerala" },
+  { pincode: "686001", city: "Kottayam", state: "Kerala" },
+  { pincode: "520001", city: "Vijayawada", state: "Andhra Pradesh" },
+  { pincode: "530001", city: "Visakhapatnam", state: "Andhra Pradesh" },
+  { pincode: "522001", city: "Guntur", state: "Andhra Pradesh" },
+  { pincode: "515001", city: "Anantapur", state: "Andhra Pradesh" },
+  // West India
+  { pincode: "400001", city: "Mumbai", state: "Maharashtra" },
+  { pincode: "400061", city: "Powai", state: "Maharashtra" },
+  { pincode: "411001", city: "Pune", state: "Maharashtra" },
+  { pincode: "440001", city: "Nagpur", state: "Maharashtra" },
+  { pincode: "431001", city: "Aurangabad", state: "Maharashtra" },
+  { pincode: "416001", city: "Kolhapur", state: "Maharashtra" },
+  { pincode: "380001", city: "Ahmedabad", state: "Gujarat" },
+  { pincode: "395001", city: "Surat", state: "Gujarat" },
+  { pincode: "390001", city: "Vadodara", state: "Gujarat" },
+  { pincode: "364001", city: "Bhavnagar", state: "Gujarat" },
+  { pincode: "370001", city: "Rajkot", state: "Gujarat" },
+  { pincode: "403001", city: "Panaji", state: "Goa" },
+  { pincode: "403004", city: "Margao", state: "Goa" },
+  { pincode: "403101", city: "Calangute", state: "Goa" },
+  // East India
+  { pincode: "700001", city: "Kolkata", state: "West Bengal" },
+  { pincode: "711101", city: "Howrah", state: "West Bengal" },
+  { pincode: "734001", city: "Siliguri", state: "West Bengal" },
+  { pincode: "713301", city: "Durgapur", state: "West Bengal" },
+  { pincode: "800001", city: "Patna", state: "Bihar" },
+  { pincode: "842001", city: "Muzaffarpur", state: "Bihar" },
+  { pincode: "846001", city: "Bhagalpur", state: "Bihar" },
+  { pincode: "751001", city: "Bhubaneswar", state: "Odisha" },
+  { pincode: "753001", city: "Cuttack", state: "Odisha" },
+  { pincode: "760001", city: "Puri", state: "Odisha" },
+  { pincode: "781001", city: "Guwahati", state: "Assam" },
+  { pincode: "785001", city: "Dibrugarh", state: "Assam" },
+  { pincode: "788001", city: "Silchar", state: "Assam" },
+  { pincode: "795001", city: "Imphal", state: "Manipur" },
+  { pincode: "797001", city: "Kohima", state: "Nagaland" },
+  { pincode: "791001", city: "Itanagar", state: "Arunachal Pradesh" },
+  { pincode: "793001", city: "Shillong", state: "Meghalaya" },
+  { pincode: "796001", city: "Aizawl", state: "Mizoram" },
+  { pincode: "799001", city: "Agartala", state: "Tripura" },
+  { pincode: "737101", city: "Gangtok", state: "Sikkim" },
+  // Central India
+  { pincode: "462001", city: "Bhopal", state: "Madhya Pradesh" },
+  { pincode: "482001", city: "Jabalpur", state: "Madhya Pradesh" },
+  { pincode: "452001", city: "Indore", state: "Madhya Pradesh" },
+  { pincode: "474001", city: "Gwalior", state: "Madhya Pradesh" },
+  { pincode: "485001", city: "Satna", state: "Madhya Pradesh" },
+  { pincode: "492001", city: "Raipur", state: "Chhattisgarh" },
+  { pincode: "495001", city: "Bilaspur", state: "Chhattisgarh" },
+  { pincode: "496001", city: "Jagdalpur", state: "Chhattisgarh" },
+  // Union Territories
+  { pincode: "682551", city: "Kavaratti", state: "Lakshadweep" },
+  { pincode: "744101", city: "Port Blair", state: "Andaman and Nicobar Islands" },
+  { pincode: "396193", city: "Silvassa", state: "Dadra and Nagar Haveli" },
+  { pincode: "396210", city: "Daman", state: "Daman and Diu" },
+  { pincode: "605001", city: "Pondicherry", state: "Puducherry" }
+];
+
+// server/routes.ts
+var limiter = rateLimit({
+  windowMs: 15 * 60 * 1e3,
+  // 15 minutes
+  max: 50,
+  // Lower limit to avoid hitting Flipkart's rate limits
+  message: "Too many requests, please try again later",
+  standardHeaders: true,
+  legacyHeaders: false
+});
+async function registerRoutes(app2) {
+  app2.use("/api", limiter);
+  app2.post("/api/check-availability", async (req, res) => {
+    try {
+      const { url } = urlSchema.parse(req.body);
+      if (!validateFlipkartUrl(url)) {
+        return res.status(400).json({ message: "Invalid Flipkart product URL" });
+      }
+      console.log("Checking availability for URL:", url);
+      const cached = await storage.getCachedResults(url);
+      if (cached) {
+        console.log("Returning cached results");
+        return res.json({ results: cached, cached: true });
+      }
+      const results = [];
+      const batchSize = 1;
+      const delayBetweenChecks = 2e3;
+      for (let i = 0; i < majorPincodes.length; i += batchSize) {
+        console.log(`Processing pincode ${i + 1} of ${majorPincodes.length}`);
+        const pincode = majorPincodes[i];
+        try {
+          const isAvailable = await checkAvailability(url, pincode.pincode);
+          results.push({
+            pincode: pincode.pincode,
+            city: pincode.city,
+            state: pincode.state,
+            isAvailable
+          });
+          if (i + batchSize < majorPincodes.length) {
+            await new Promise((resolve) => setTimeout(resolve, delayBetweenChecks));
+          }
+        } catch (error) {
+          console.error(`Error checking pincode ${pincode.pincode}:`, error);
+          results.push({
+            pincode: pincode.pincode,
+            city: pincode.city,
+            state: pincode.state,
+            isAvailable: false
+          });
+        }
+      }
+      console.log("Final availability results:", results);
+      await storage.saveResults(url, results);
+      res.json({ results, cached: false });
+    } catch (error) {
+      console.error("Error checking availability:", error);
+      res.status(400).json({ message: error.message || "Failed to check availability" });
+    }
+  });
+  const httpServer = createServer(app2);
+  return httpServer;
+}
+
+// server/vite.ts
+import express from "express";
+import fs from "fs";
+import path2, { dirname as dirname2 } from "path";
+import { fileURLToPath as fileURLToPath2 } from "url";
+import { createServer as createViteServer, createLogger } from "vite";
+
+// vite.config.ts
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import themePlugin from "@replit/vite-plugin-shadcn-theme-json";
+import path, { dirname } from "path";
+import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
+import { fileURLToPath } from "url";
+var __filename = fileURLToPath(import.meta.url);
+var __dirname = dirname(__filename);
+var vite_config_default = defineConfig({
+  plugins: [
+    react(),
+    runtimeErrorOverlay(),
+    themePlugin(),
+    ...process.env.NODE_ENV !== "production" && process.env.REPL_ID !== void 0 ? [
+      await import("@replit/vite-plugin-cartographer").then(
+        (m) => m.cartographer()
+      )
+    ] : []
+  ],
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "client", "src"),
+      "@shared": path.resolve(__dirname, "shared")
+    }
+  },
+  root: path.resolve(__dirname, "client"),
+  build: {
+    outDir: path.resolve(__dirname, "dist/public"),
+    emptyOutDir: true
+  }
+});
+
+// server/vite.ts
+import { nanoid } from "nanoid";
+var __filename2 = fileURLToPath2(import.meta.url);
+var __dirname2 = dirname2(__filename2);
+var viteLogger = createLogger();
+function log(message, source = "express") {
+  const formattedTime = (/* @__PURE__ */ new Date()).toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true
+  });
+  console.log(`${formattedTime} [${source}] ${message}`);
+}
+async function setupVite(app2, server) {
+  const serverOptions = {
+    middlewareMode: true,
+    hmr: { server },
+    allowedHosts: true
+  };
+  const vite = await createViteServer({
+    ...vite_config_default,
+    configFile: false,
+    customLogger: {
+      ...viteLogger,
+      error: (msg, options) => {
+        viteLogger.error(msg, options);
+        process.exit(1);
+      }
+    },
+    server: serverOptions,
+    appType: "custom"
+  });
+  app2.use(vite.middlewares);
+  app2.use("*", async (req, res, next) => {
+    const url = req.originalUrl;
+    try {
+      const clientTemplate = path2.resolve(
+        __dirname2,
+        "..",
+        "client",
+        "index.html"
+      );
+      let template = await fs.promises.readFile(clientTemplate, "utf-8");
+      template = template.replace(
+        `src="/src/main.tsx"`,
+        `src="/src/main.tsx?v=${nanoid()}"`
+      );
+      const page = await vite.transformIndexHtml(url, template);
+      res.status(200).set({ "Content-Type": "text/html" }).end(page);
+    } catch (e) {
+      vite.ssrFixStacktrace(e);
+      next(e);
+    }
+  });
+}
+function serveStatic(app2) {
+  const distPath = path2.resolve(__dirname2, "public");
+  if (!fs.existsSync(distPath)) {
+    throw new Error(
+      `Could not find the build directory: ${distPath}, make sure to build the client first`
+    );
+  }
+  app2.use(express.static(distPath));
+  app2.use("*", (_req, res) => {
+    res.sendFile(path2.resolve(distPath, "index.html"));
+  });
+}
+
+// server/index.ts
+var app = express2();
+app.use(express2.json());
+app.use(express2.urlencoded({ extended: false }));
+app.use((req, res, next) => {
+  const start = Date.now();
+  const path3 = req.path;
+  let capturedJsonResponse = void 0;
+  const originalResJson = res.json;
+  res.json = function(bodyJson, ...args) {
+    capturedJsonResponse = bodyJson;
+    return originalResJson.apply(res, [bodyJson, ...args]);
+  };
+  res.on("finish", () => {
+    const duration = Date.now() - start;
+    if (path3.startsWith("/api")) {
+      let logLine = `${req.method} ${path3} ${res.statusCode} in ${duration}ms`;
+      if (capturedJsonResponse) {
+        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
+      }
+      if (logLine.length > 80) {
+        logLine = logLine.slice(0, 79) + "\u2026";
+      }
+      log(logLine);
+    }
+  });
+  next();
+});
+(async () => {
+  const server = await registerRoutes(app);
+  app.use((err, _req, res, _next) => {
+    const status = err.status || err.statusCode || 500;
+    const message = err.message || "Internal Server Error";
+    res.status(status).json({ message });
+    throw err;
+  });
+  if (app.get("env") === "development") {
+    await setupVite(app, server);
+  } else {
+    serveStatic(app);
+  }
+  const port = 5e3;
+  server.listen({
+    port,
+    host: "0.0.0.0",
+    reusePort: true
+  }, () => {
+    log(`serving on port ${port}`);
+  });
+})();
