@@ -17,7 +17,7 @@ const setup = async () => {
 let appPromise = setup();
 
 // Export the handler function for Vercel
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req: any, res: any) {
   const app = await appPromise;
   return new Promise((resolve, reject) => {
     // Create a mock response to capture Express's response
