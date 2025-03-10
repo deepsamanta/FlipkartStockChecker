@@ -25,38 +25,46 @@ const setup = async () => {
 let appPromise = setup();
 
 // Export the handler function for Vercel
-export default async function handler(req: any, res: any) {
-  const app = await appPromise;
-  return new Promise<void>((resolve, reject) => {
-    // Create a mock response to capture Express's response
-    const mockRes = {
-      ...res,
-      end: function(chunk?: string | Buffer) {
-        res.end(chunk);
-        resolve();
-        return this;
-      },
-      sendFile: function(filePath: string) {
-        // Read the file and send it
-        const fs = require('fs');
-        try {
-          const content = fs.readFileSync(filePath, 'utf8');
-          res.setHeader('Content-Type', 'text/html');
-          res.end(content);
-          resolve();
-        } catch (err) {
-          res.statusCode = 404;
-          res.end('File not found');
-          resolve();
-        }
-        return this;
-      }
-    };
+export default async function handler(req, res) {
+  try {
+    const app = await appPromise;
     
-    // Forward the request to the Express app
-    app(req, mockRes, (e: any) => {
-      if (e) reject(e);
-      resolve();
+    return new Promise((resolve, reject) => {
+      const mockRes = {
+        ...res,
+        end: function(chunk) {
+          res.end(chunk);
+          resolve();
+          return this;
+        },
+        sendFile: function(filePath) {
+          const fs = require('fs');
+          try {
+            const content = fs.readFileSync(filePath, 'utf8');
+            res.setHeader('Content-Type', 'text/html');
+            res.end(content);
+            resolve();
+          } catch (err) {
+            res.statusCode = 404;
+            res.end('File not found');
+            resolve();
+          }
+          return this;
+        }
+      };
+      
+      app(req, mockRes, (e) => {
+        if (e) {
+          console.error('Express error:', e);
+          res.status(500).send('Internal Server Error');
+          reject(e);
+        }
+        resolve();
+      });
     });
-  });
+  } catch (error) {
+    console.error('Handler error:', error);
+    res.status(500).send('Internal Server Error');
+    throw error;
+  }
 }
