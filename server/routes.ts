@@ -8,7 +8,10 @@ import { majorPincodes } from "../client/src/lib/pincodes";
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100 // limit each IP to 100 requests per windowMs
+  max: 50, // Lower limit to avoid hitting Flipkart's rate limits
+  message: "Too many requests, please try again later",
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 
 export async function registerRoutes(app: Express) {
@@ -17,7 +20,7 @@ export async function registerRoutes(app: Express) {
   app.post("/api/check-availability", async (req, res) => {
     try {
       const { url } = urlSchema.parse(req.body);
-      
+
       if (!validateFlipkartUrl(url)) {
         return res.status(400).json({ message: "Invalid Flipkart product URL" });
       }
@@ -29,23 +32,37 @@ export async function registerRoutes(app: Express) {
       }
 
       // Check availability for all major pincodes
-      const results = await Promise.all(
-        majorPincodes.map(async (pincode) => {
-          const isAvailable = await checkAvailability(url, pincode.pincode);
-          return {
-            pincode: pincode.pincode,
-            city: pincode.city,
-            state: pincode.state,
-            isAvailable
-          };
-        })
-      );
+      // Use Promise.all with a concurrency limit to avoid overwhelming the server
+      const batchSize = 2;
+      const results = [];
+
+      for (let i = 0; i < majorPincodes.length; i += batchSize) {
+        const batch = majorPincodes.slice(i, i + batchSize);
+        const batchResults = await Promise.all(
+          batch.map(async (pincode) => {
+            const isAvailable = await checkAvailability(url, pincode.pincode);
+            return {
+              pincode: pincode.pincode,
+              city: pincode.city,
+              state: pincode.state,
+              isAvailable
+            };
+          })
+        );
+        results.push(...batchResults);
+
+        // Add a small delay between batches
+        if (i + batchSize < majorPincodes.length) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
 
       await storage.saveResults(url, results);
-      
+
       res.json({ results, cached: false });
     } catch (error: any) {
-      res.status(400).json({ message: error.message });
+      console.error("Error checking availability:", error);
+      res.status(400).json({ message: error.message || "Failed to check availability" });
     }
   });
 
