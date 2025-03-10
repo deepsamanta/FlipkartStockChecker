@@ -25,9 +25,12 @@ export async function registerRoutes(app: Express) {
         return res.status(400).json({ message: "Invalid Flipkart product URL" });
       }
 
+      console.log('Checking availability for URL:', url);
+
       // Check cache first
       const cached = await storage.getCachedResults(url);
       if (cached) {
+        console.log('Returning cached results');
         return res.json({ results: cached, cached: true });
       }
 
@@ -38,6 +41,8 @@ export async function registerRoutes(app: Express) {
 
       for (let i = 0; i < majorPincodes.length; i += batchSize) {
         const batch = majorPincodes.slice(i, i + batchSize);
+        console.log(`Processing batch ${i/batchSize + 1} of ${Math.ceil(majorPincodes.length/batchSize)}`);
+
         const batchResults = await Promise.all(
           batch.map(async (pincode) => {
             const isAvailable = await checkAvailability(url, pincode.pincode);
@@ -57,6 +62,7 @@ export async function registerRoutes(app: Express) {
         }
       }
 
+      console.log('Final availability results:', results);
       await storage.saveResults(url, results);
 
       res.json({ results, cached: false });
