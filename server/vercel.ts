@@ -1,5 +1,4 @@
 
-import { VercelRequest, VercelResponse } from '@vercel/node';
 import express from 'express';
 import path from 'path';
 import { registerRoutes } from './routes';
