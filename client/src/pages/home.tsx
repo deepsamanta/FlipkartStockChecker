@@ -10,12 +10,13 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Form, FormControl, FormField, FormItem, FormMessage } from "@/components/ui/form";
 import { SiFlipkart } from "react-icons/si";
-import { Check, X, Loader2 } from "lucide-react";
+import { Check, X, Loader2, Search } from "lucide-react";
 
 export default function Home() {
   const { toast } = useToast();
   const [results, setResults] = useState<PincodeAvailability[]>([]);
-  
+  const [searchQuery, setSearchQuery] = useState("");
+
   const form = useForm({
     resolver: zodResolver(urlSchema),
     defaultValues: {
@@ -46,22 +47,31 @@ export default function Home() {
     }
   });
 
+  const filteredResults = results.filter(result => {
+    const searchLower = searchQuery.toLowerCase();
+    return (
+      result.city.toLowerCase().includes(searchLower) ||
+      result.state.toLowerCase().includes(searchLower) ||
+      result.pincode.includes(searchQuery)
+    );
+  });
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-background to-muted p-4 md:p-8">
-      <div className="max-w-4xl mx-auto space-y-8">
+      <div className="max-w-6xl mx-auto space-y-8">
         <div className="space-y-4 text-center">
           <div className="flex items-center justify-center gap-2">
-            <SiFlipkart className="w-8 h-8 text-primary" />
-            <h1 className="text-4xl font-bold bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent">
+            <SiFlipkart className="w-10 h-10 text-primary" />
+            <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent">
               Flipkart Availability Checker
             </h1>
           </div>
-          <p className="text-muted-foreground">
-            Check product availability across major Indian cities
+          <p className="text-lg text-muted-foreground">
+            Check product availability across major Indian cities instantly
           </p>
         </div>
 
-        <Card className="p-6">
+        <Card className="p-6 shadow-lg border-2">
           <Form {...form}>
             <form 
               onSubmit={form.handleSubmit((data) => checkMutation.mutate(data.url))}
@@ -75,6 +85,7 @@ export default function Home() {
                     <FormControl>
                       <Input
                         placeholder="Enter Flipkart product URL..."
+                        className="text-lg p-6"
                         {...field}
                       />
                     </FormControl>
@@ -84,13 +95,13 @@ export default function Home() {
               />
               <Button 
                 type="submit" 
-                className="w-full"
+                className="w-full text-lg p-6"
                 disabled={checkMutation.isPending}
               >
                 {checkMutation.isPending ? (
                   <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Checking...
+                    <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                    Checking Availability...
                   </>
                 ) : "Check Availability"}
               </Button>
@@ -99,27 +110,48 @@ export default function Home() {
         </Card>
 
         {results.length > 0 && (
-          <Card className="p-6">
-            <h2 className="text-xl font-semibold mb-4">Availability Results</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {results.map((result) => (
-                <Card 
-                  key={result.pincode}
-                  className="p-4 flex items-center justify-between"
-                >
-                  <div>
-                    <div className="font-medium">{result.city}</div>
-                    <div className="text-sm text-muted-foreground">
-                      {result.state} - {result.pincode}
+          <Card className="p-6 shadow-lg">
+            <div className="space-y-4">
+              <div className="flex items-center gap-4">
+                <h2 className="text-2xl font-semibold">Availability Results</h2>
+                <div className="flex-1 relative">
+                  <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground h-5 w-5" />
+                  <Input
+                    placeholder="Search by city or state..."
+                    className="pl-10"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {filteredResults.map((result) => (
+                  <Card 
+                    key={result.pincode}
+                    className={`p-4 transition-colors ${
+                      result.isAvailable 
+                        ? 'bg-green-50 dark:bg-green-950/20 border-green-200' 
+                        : 'bg-red-50 dark:bg-red-950/20 border-red-200'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <div className="text-lg font-medium">{result.city}</div>
+                        <div className="text-sm text-muted-foreground">
+                          {result.state}
+                        </div>
+                        <div className="text-sm font-mono mt-1">{result.pincode}</div>
+                      </div>
+                      {result.isAvailable ? (
+                        <Check className="h-6 w-6 text-green-600" />
+                      ) : (
+                        <X className="h-6 w-6 text-red-600" />
+                      )}
                     </div>
-                  </div>
-                  {result.isAvailable ? (
-                    <Check className="h-5 w-5 text-green-500" />
-                  ) : (
-                    <X className="h-5 w-5 text-red-500" />
-                  )}
-                </Card>
-              ))}
+                  </Card>
+                ))}
+              </div>
             </div>
           </Card>
         )}
